@@ -75,10 +75,44 @@ class KaufmannRefreshScraper(BaseRefreshScraper):
                         "--disable-background-timer-throttling",
                         "--disable-renderer-backgrounding",
                         "--no-sandbox",
-                        "--single-process",
                     ],
                 )
 
+            return self._render_product_page(url, row=row)
+        except Exception as exc:
+            if self._is_browser_closed_error(exc):
+                LOG.warning("Kaufmann browser closed while rendering %s; relaunching once.", url)
+                self._discard_browser()
+                try:
+                    if self._playwright is None:
+                        self._playwright = sync_playwright().start()
+                    self._browser = self._playwright.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--disable-dev-shm-usage",
+                            "--disable-gpu",
+                            "--disable-software-rasterizer",
+                            "--disable-extensions",
+                            "--disable-background-networking",
+                            "--disable-background-timer-throttling",
+                            "--disable-renderer-backgrounding",
+                            "--no-sandbox",
+                        ],
+                    )
+                    return self._render_product_page(url, row=row)
+                except Exception as retry_exc:
+                    self._last_render_error = str(retry_exc)
+                    return FetchResult(url=url, status_code=None, error=self._last_render_error)
+
+            self._last_render_error = str(exc)
+            return FetchResult(url=url, status_code=None, error=self._last_render_error)
+
+    def _render_product_page(
+        self, url: str, row: Optional[dict[str, Any]] = None
+    ) -> FetchResult:
+        context = None
+        page = None
+        try:
             context = self._browser.new_context(extra_http_headers=self.session.headers)
             page = context.new_page()
             response = page.goto(url, wait_until="domcontentloaded", timeout=20000)
@@ -104,24 +138,34 @@ class KaufmannRefreshScraper(BaseRefreshScraper):
                 html += f"\n<!-- highlide_selected_color={selected_color} -->"
             self._last_rendered_with_playwright = True
             return FetchResult(url=url, status_code=status_code, html=html)
-        except Exception as exc:
-            self._last_render_error = str(exc)
-            return FetchResult(url=url, status_code=None, error=self._last_render_error)
         finally:
-            if page:
+            if context:
                 try:
-                    page.context.close()
+                    context.close()
                 except Exception:
-                    page.close()
+                    pass
+
+    def _is_browser_closed_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "target page, context or browser has been closed" in message
 
     def close(self) -> None:
-        if self._browser:
-            self._browser.close()
-            self._browser = None
+        self._discard_browser()
         if self._playwright:
-            self._playwright.stop()
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
             self._playwright = None
         super().close()
+
+    def _discard_browser(self) -> None:
+        if self._browser:
+            try:
+                self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
 
     def _target_color(self, row: Optional[dict[str, Any]]) -> Optional[str]:
         if not row:
