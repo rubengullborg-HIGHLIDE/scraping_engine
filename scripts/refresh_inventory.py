@@ -219,6 +219,7 @@ class SupabaseRestClient:
 
 
 def build_update_payload(config: RefreshConfig, snapshot: Any) -> dict[str, Any]:
+    sizes_reliable = snapshot.raw.get("sizes_reliable") is not False
     field_map = {
         config.checked_at_column: snapshot.checked_at,
         config.current_price_column: snapshot.current_price,
@@ -231,7 +232,11 @@ def build_update_payload(config: RefreshConfig, snapshot: Any) -> dict[str, Any]
         config.refresh_error_column: None,
         config.raw_refresh_column: snapshot.raw,
     }
-    return {key: value for key, value in field_map.items() if key}
+    payload = {key: value for key, value in field_map.items() if key}
+    if not sizes_reliable:
+        payload.pop(config.available_sizes_column, None)
+        payload.pop(config.size_status_column, None)
+    return payload
 
 
 def build_history_payload(
@@ -240,16 +245,22 @@ def build_history_payload(
     snapshot: Any,
 ) -> dict[str, Any]:
     checked_bucket = history_bucket(snapshot.checked_at, config.history_bucket_minutes)
-    return {
+    payload = {
         "product_id": row[config.id_column],
         "store": row.get("store"),
         "product_url": row.get(config.url_column),
         "checked_at": snapshot.checked_at,
         "checked_bucket": checked_bucket,
         "price": snapshot.current_price,
-        "sizes": snapshot.sizes,
         "updated_at": snapshot.checked_at,
     }
+    if snapshot.raw.get("sizes_reliable") is not False:
+        payload["sizes"] = snapshot.sizes
+    return payload
+
+
+def should_write_inventory_history(snapshot: Any) -> bool:
+    return snapshot.raw.get("sizes_reliable") is not False
 
 
 def history_bucket(checked_at: str, bucket_minutes: int) -> str:
@@ -336,11 +347,17 @@ def refresh_inventory(args: argparse.Namespace) -> int:
                     LOG.info("Dry run update for %s: %s", product_id, json.dumps(payload))
                 else:
                     client.update_product(product_id, payload)
-                    client.upsert_optional(
-                        config.history_table,
-                        build_history_payload(config, row, snapshot),
-                        on_conflict="product_id,checked_bucket",
-                    )
+                    if should_write_inventory_history(snapshot):
+                        client.upsert_optional(
+                            config.history_table,
+                            build_history_payload(config, row, snapshot),
+                            on_conflict="product_id,checked_bucket",
+                        )
+                    elif config.history_table:
+                        LOG.warning(
+                            "Skipping inventory history for product id=%s because sizes were not reliable.",
+                            product_id,
+                        )
                     client.insert_optional(
                         config.price_history_table,
                         build_price_history_payload(config, row, snapshot),

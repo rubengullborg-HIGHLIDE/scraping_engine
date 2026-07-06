@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from typing import Any, Optional, Tuple, Union
@@ -16,6 +17,9 @@ from scrapers.base import (
 )
 
 
+LOG = logging.getLogger(__name__)
+
+
 class KaufmannRefreshScraper(BaseRefreshScraper):
     store_key = "kaufmann"
 
@@ -25,24 +29,35 @@ class KaufmannRefreshScraper(BaseRefreshScraper):
         self._playwright = None
         self._browser = None
         self._last_selected_color = None
+        self._last_rendered_with_playwright = False
+        self._last_render_error = None
 
     def fetch_html(self, url: str, row: Optional[dict[str, Any]] = None) -> FetchResult:
         if self.use_playwright:
             rendered = self._fetch_html_with_playwright(url, row=row)
             if rendered.html or rendered.status_code in {404, 410}:
                 return rendered
+            LOG.warning(
+                "Kaufmann Playwright render failed for %s; falling back to static HTML: %s",
+                url,
+                rendered.error,
+            )
         return super().fetch_html(url)
 
     def _fetch_html_with_playwright(
         self, url: str, row: Optional[dict[str, Any]] = None
     ) -> FetchResult:
+        self._last_rendered_with_playwright = False
+        self._last_render_error = None
+
         try:
             from playwright.sync_api import sync_playwright
         except ModuleNotFoundError:
+            self._last_render_error = "Playwright is not installed."
             return FetchResult(
                 url=url,
                 status_code=None,
-                error="Playwright is not installed. Falling back to static HTML.",
+                error=self._last_render_error,
             )
 
         page = None
@@ -73,9 +88,11 @@ class KaufmannRefreshScraper(BaseRefreshScraper):
             html = page.content()
             if selected_color:
                 html += f"\n<!-- highlide_selected_color={selected_color} -->"
+            self._last_rendered_with_playwright = True
             return FetchResult(url=url, status_code=status_code, html=html)
         except Exception as exc:
-            return FetchResult(url=url, status_code=None, error=str(exc))
+            self._last_render_error = str(exc)
+            return FetchResult(url=url, status_code=None, error=self._last_render_error)
         finally:
             if page:
                 page.close()
@@ -296,6 +313,8 @@ class KaufmannRefreshScraper(BaseRefreshScraper):
                 "parser": "kaufmann_html_selectors",
                 "variant_count": len(sizes),
                 "rendered_with_playwright": self._browser is not None,
+                "sizes_reliable": bool(sizes) and self._last_rendered_with_playwright,
+                "render_error": self._last_render_error,
                 "target_color": self._target_color(row),
                 "selected_color": self._last_selected_color,
             },
