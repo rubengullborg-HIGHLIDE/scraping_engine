@@ -15,6 +15,7 @@ def scraper_for_product(row: dict, **kwargs) -> BaseRefreshScraper:
     if "kaufmann" in host or "kaufmann" in store:
         return KaufmannRefreshScraper(**kwargs)
     if "stvalentin" in host or "s.t. valentin" in store or "st valentin" in store:
+        kwargs.pop("use_playwright", None)
         return STValentinRefreshScraper(**kwargs)
 
     raise ValueError(f"No refresh scraper registered for store/url: {store or url}")

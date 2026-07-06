@@ -64,9 +64,23 @@ class KaufmannRefreshScraper(BaseRefreshScraper):
         try:
             if self._playwright is None:
                 self._playwright = sync_playwright().start()
-                self._browser = self._playwright.chromium.launch(headless=True)
+                self._browser = self._playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-software-rasterizer",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--disable-background-timer-throttling",
+                        "--disable-renderer-backgrounding",
+                        "--no-sandbox",
+                        "--single-process",
+                    ],
+                )
 
-            page = self._browser.new_page(extra_http_headers=self.session.headers)
+            context = self._browser.new_context(extra_http_headers=self.session.headers)
+            page = context.new_page()
             response = page.goto(url, wait_until="domcontentloaded", timeout=20000)
             page.wait_for_load_state("networkidle", timeout=8000)
 
@@ -95,7 +109,10 @@ class KaufmannRefreshScraper(BaseRefreshScraper):
             return FetchResult(url=url, status_code=None, error=self._last_render_error)
         finally:
             if page:
-                page.close()
+                try:
+                    page.context.close()
+                except Exception:
+                    page.close()
 
     def close(self) -> None:
         if self._browser:

@@ -48,6 +48,13 @@ def env_column(name: str, default: str) -> str:
     return value
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = env(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass(frozen=True)
 class RefreshConfig:
     supabase_url: str
@@ -328,6 +335,7 @@ def refresh_inventory(args: argparse.Namespace) -> int:
                     },
                     min_delay_seconds=args.min_delay,
                     max_delay_seconds=args.max_delay,
+                    use_playwright=not args.no_playwright,
                 )
                 cache_key = scraper.store_key
                 if cache_key not in scraper_cache:
@@ -396,6 +404,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--store", help="Optional store-name filter, for example Kaufmann.")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse without DB writes.")
     parser.add_argument("--no-delay", action="store_true", help="Disable polite delay for local tests.")
+    parser.add_argument(
+        "--no-playwright",
+        action="store_true",
+        default=env_bool("REFRESH_NO_PLAYWRIGHT", False),
+        help="Skip browser rendering. Price refresh still runs, but Kaufmann sizes are not updated.",
+    )
     parser.add_argument("--min-delay", type=float, default=float(env("REFRESH_MIN_DELAY", "1.5")))
     parser.add_argument("--max-delay", type=float, default=float(env("REFRESH_MAX_DELAY", "3.0")))
     parser.add_argument(
