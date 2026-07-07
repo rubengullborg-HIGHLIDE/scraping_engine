@@ -19,7 +19,10 @@ Do not mix these two paths. Full import can collect names, descriptions, images,
 ├── requirements.txt
 ├── migrations/
 │   ├── 001_product_inventory_snapshots.sql
-│   └── 002_simplify_product_inventory_snapshots.sql
+│   ├── 002_simplify_product_inventory_snapshots.sql
+│   ├── 003_kaufmann_products.sql
+│   ├── 004_kaufmann_aarhus_inventory.sql
+│   └── 005_clean_aarhus_inventory_interface.sql
 ├── scrapers/
 │   ├── base.py
 │   ├── full_import/
@@ -30,6 +33,7 @@ Do not mix these two paths. Full import can collect names, descriptions, images,
 │       ├── kaufmann.py
 │       └── st_valentin.py
 └── scripts/
+    ├── import_kaufmann_products.py
     └── refresh_inventory.py
 ```
 
@@ -51,7 +55,94 @@ These are store-specific catalog scrapers. They are allowed to parse broad produ
 - size availability if visible
 - store/source info
 
-These files are not currently wired into a single import runner. Treat them as the saved full-import implementation until a dedicated `scripts/full_import.py` is added.
+Kaufmann full import is currently wired through `scripts/import_kaufmann_products.py`. Other full-import scrapers are still saved implementations until dedicated runners are added.
+
+### Kaufmann Full Import
+
+Location:
+
+- `scripts/import_kaufmann_products.py`
+- `scrapers/full_import/kaufmann.py`
+- `migrations/003_kaufmann_products.sql`
+
+Kaufmann products should be imported into the dedicated `kaufmann_products` table, not the frontend-facing `products` table.
+
+The Kaufmann importer discovers product URLs from:
+
+```text
+https://www.kaufmann.dk/sitemap.xml
+```
+
+That sitemap points to a compressed child sitemap ending in `.xml.gz`; the importer follows and decompresses it. As of July 7, 2026 it discovers about 4,878 Kaufmann product URLs.
+
+The importer uses Playwright to read Kaufmann's live Alpine state:
+
+```js
+Alpine.store('productStore')
+```
+
+Kaufmann color variants are keyed by `colorId`. The stable unique key for rows in `kaufmann_products` is:
+
+```text
+source_parent_id + source_color_id
+```
+
+For each color variant, the importer stores:
+
+- product/style metadata: URL, name, brand, description, materials, fit, images, price
+- top-level `source_product_number` is currently null for Kaufmann variant rows; Kaufmann exposes product numbers at size level, so keep those source refs in `webshop_sizes` or `raw`, not in the frontend-facing inventory shape
+- `category` is currently null unless a future scraper revision extracts a reliable Kaufmann category/breadcrumb
+- `color`: the exact Kaufmann color name, for example `SORT`, `HVID`, `NAVY`
+- `color_group`: Kaufmann's grouped color family, for example `Sort`, `Hvid`, `Blå`
+- `webshop_sizes`: online-shop stock, kept only as reference
+- `aarhus_inventory`: clean reusable Aarhus store inventory for product detail pages
+- `aarhus_total_stock`
+- `aarhus_available`
+
+`aarhus_inventory` is a store-agnostic JSON interface. Keep source-specific ids such as Kaufmann `warehouse_id`, `productNumber`, and size variant ids out of this object; put them in `raw` if they are useful for debugging or future scraper work.
+
+```json
+{
+  "stores": {
+    "bruuns-galleri": {
+      "name": "KAUFMANN Aarhus, Bruuns Galleri",
+      "stock_known": true,
+      "available": true,
+      "total_stock": 4,
+      "sizes": {
+        "S": { "available": false, "stock": 0 },
+        "M": { "available": false, "stock": 0 },
+        "L": { "available": true, "stock": 2 }
+      }
+    }
+  }
+}
+```
+
+Use stable ASCII slugs as store keys, for example `aarhus-c`, `bruuns-galleri`, or `storcenter-nord`. Put the display label in `name`. If a future store only exposes whether a size is available but not exact counts, use `stock_known: false` and `stock: null`.
+
+Keep `aarhus_total_stock` and `aarhus_available` as query-friendly summary columns. Do not recreate split top-level JSON columns such as `aarhus_sizes` or `aarhus_store_stock`.
+
+The Aarhus stores currently tracked are:
+
+```text
+bruuns-galleri    KAUFMANN Aarhus, Bruuns Galleri
+storcenter-nord   KAUFMANN Aarhus, Storcenter Nord
+aarhus-c          KAUFMANN Aarhus, Strøget - Regina
+```
+
+Do not treat Kaufmann's top-level `availability` as local stock. That field is webshop availability. Local store inventory is under each size option's `stock` object, keyed by store/warehouse.
+
+Useful commands:
+
+```bash
+python scripts/import_kaufmann_products.py --discover-only --preview 10
+python scripts/import_kaufmann_products.py --dry-run --limit 1 --no-delay
+python scripts/import_kaufmann_products.py --limit 100
+python scripts/import_kaufmann_products.py --offset 100 --limit 100
+```
+
+Run large imports in batches with polite delays. A full Kaufmann import can involve thousands of product pages and multiple color variants per page.
 
 ### Inventory Refresh
 
@@ -84,6 +175,35 @@ The current production shape is a single `products` table with fields similar to
 - `category`
 
 The refresh job is configured through environment variables so it can map to this Danish/current schema.
+
+There is also a dedicated Kaufmann import table:
+
+```text
+kaufmann_products
+├── source_parent_id
+├── source_color_id
+├── source_url
+├── canonical_url
+├── source_product_number
+├── name
+├── brand
+├── color
+├── color_group
+├── current_price
+├── list_price
+├── description
+├── materials
+├── fit
+├── category
+├── images
+├── webshop_sizes
+├── aarhus_inventory
+├── aarhus_total_stock
+├── aarhus_available
+└── raw
+```
+
+`kaufmann_products` has RLS enabled. Do not add broad public policies without checking frontend access requirements.
 
 Recommended current `.env` mappings:
 
@@ -179,6 +299,8 @@ Make sure the server has:
 Many fashion store pages represent one clothing style with multiple color variants. Each color can have different size availability.
 
 The current `products` table stores product rows with a `color` field, but not a stable source variant id. Kaufmann refresh currently tries to select the matching color using the row color text before extracting sizes. This is a heuristic and can be wrong when the store page exposes only family-level product data or image-only color swatches.
+
+For Kaufmann, the full-import path now solves this by importing one row per color variant into `kaufmann_products`, using Kaufmann's `colorId` as `source_color_id`. Prefer this table for Kaufmann catalog experiments and local Aarhus inventory modeling.
 
 The better future model is:
 
