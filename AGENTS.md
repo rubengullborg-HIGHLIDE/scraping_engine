@@ -73,7 +73,7 @@ The Kaufmann importer discovers product URLs from:
 https://www.kaufmann.dk/sitemap.xml
 ```
 
-That sitemap points to a compressed child sitemap ending in `.xml.gz`; the importer follows and decompresses it. As of July 7, 2026 it discovers about 4,878 Kaufmann product URLs.
+That sitemap points to a compressed child sitemap ending in `.xml.gz`; the importer follows and decompresses it. As of July 8, 2026 it discovers 4,878 Kaufmann product URLs.
 
 The importer uses Playwright to read Kaufmann's live Alpine state:
 
@@ -144,6 +144,29 @@ python scripts/import_kaufmann_products.py --offset 100 --limit 100
 
 Run large imports in batches with polite delays. A full Kaufmann import can involve thousands of product pages and multiple color variants per page.
 
+Current Kaufmann import status as of July 8, 2026:
+
+- The initial full Kaufmann import has completed.
+- `kaufmann_products` contains 8,023 color-variant rows from 4,878 distinct product pages.
+- 1,258 color variants have `aarhus_available = true`.
+- 828 distinct product pages have at least one Aarhus-available color variant.
+- The table contains 103 brands.
+- Summed local Aarhus stock across all imported color variants is 20,297 units.
+- `aarhus_inventory` uses the clean `{"stores": {...}}` interface on all rows.
+- No persisted import log is guaranteed unless the script was run with shell redirection into `logs/`.
+
+Useful status SQL:
+
+```sql
+select
+  count(*) as total_variant_rows,
+  count(distinct canonical_url) as total_product_pages,
+  count(*) filter (where aarhus_available) as aarhus_available_variant_rows,
+  count(distinct canonical_url) filter (where aarhus_available) as product_pages_with_any_aarhus_available_variant,
+  max(scraped_at) as newest_scraped_at
+from public.kaufmann_products;
+```
+
 ### Inventory Refresh
 
 Location:
@@ -155,6 +178,19 @@ Location:
 This path reads existing product rows from Supabase and updates only dynamic fields. It must not create duplicate product rows.
 
 The stable update key is the database product row `id`, because the job first reads products and then patches the same row. For long-term product identity across tables, prefer `store + source_variant_id` or `store + normalized variant URL` once full import captures those fields.
+
+The existing generic refresh path is still oriented around the frontend-facing `products` table. For Kaufmann, the next planned task is to create a dedicated refresh cron script for `kaufmann_products`.
+
+Recommended Kaufmann refresh behavior:
+
+- Read existing distinct `canonical_url` or `source_parent_id` values from `kaufmann_products`.
+- Re-scrape each product page with the Kaufmann full-import parser.
+- Upsert by the existing unique key: `source_parent_id + source_color_id`.
+- Refresh only dynamic fields by default: `current_price`, `list_price`, `webshop_sizes`, `aarhus_inventory`, `aarhus_total_stock`, `aarhus_available`, `raw`, `scraped_at`, and `updated_at`.
+- Keep the clean `aarhus_inventory` interface stable for the frontend.
+- Store source-specific ids under `raw`, not in the frontend-facing inventory object.
+- Write logs to `logs/kaufmann_refresh.log` when run as cron.
+- Use UTC timestamps in the database.
 
 ## Current Database Assumptions
 
