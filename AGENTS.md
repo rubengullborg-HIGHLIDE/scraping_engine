@@ -17,12 +17,18 @@ Do not mix these two paths. Full import can collect names, descriptions, images,
 .
 ├── AGENTS.md
 ├── requirements.txt
+├── deployment/
+│   ├── digitalocean.md
+│   └── systemd/
+│       ├── highlide-kaufmann-refresh.service
+│       └── highlide-kaufmann-refresh.timer
 ├── migrations/
 │   ├── 001_product_inventory_snapshots.sql
 │   ├── 002_simplify_product_inventory_snapshots.sql
 │   ├── 003_kaufmann_products.sql
 │   ├── 004_kaufmann_aarhus_inventory.sql
-│   └── 005_clean_aarhus_inventory_interface.sql
+│   ├── 005_clean_aarhus_inventory_interface.sql
+│   └── 006_kaufmann_inventory_snapshots.sql
 ├── scrapers/
 │   ├── base.py
 │   ├── full_import/
@@ -34,6 +40,7 @@ Do not mix these two paths. Full import can collect names, descriptions, images,
 │       └── st_valentin.py
 └── scripts/
     ├── import_kaufmann_products.py
+    ├── refresh_kaufmann_inventory.py
     └── refresh_inventory.py
 ```
 
@@ -172,6 +179,7 @@ from public.kaufmann_products;
 Location:
 
 - `scripts/refresh_inventory.py`
+- `scripts/refresh_kaufmann_inventory.py`
 - `scrapers/base.py`
 - `scrapers/stores/`
 
@@ -181,16 +189,54 @@ The stable update key is the database product row `id`, because the job first re
 
 The existing generic refresh path is still oriented around the frontend-facing `products` table. For Kaufmann, the next planned task is to create a dedicated refresh cron script for `kaufmann_products`.
 
-Recommended Kaufmann refresh behavior:
+Kaufmann refresh is handled by `scripts/refresh_kaufmann_inventory.py`. It intentionally updates only dynamic fields on existing `kaufmann_products` rows:
 
 - Read existing distinct `canonical_url` or `source_parent_id` values from `kaufmann_products`.
 - Re-scrape each product page with the Kaufmann full-import parser.
-- Upsert by the existing unique key: `source_parent_id + source_color_id`.
-- Refresh only dynamic fields by default: `current_price`, `list_price`, `webshop_sizes`, `aarhus_inventory`, `aarhus_total_stock`, `aarhus_available`, `raw`, `scraped_at`, and `updated_at`.
+- Patch existing rows by database `id`; do not create duplicate rows.
+- Skip newly discovered color variants during refresh. Add them through full import instead.
+- Refresh only dynamic fields: `current_price`, `list_price`, `webshop_sizes`, `aarhus_inventory`, `aarhus_total_stock`, `aarhus_available`, `scraped_at`, and `updated_at`.
 - Keep the clean `aarhus_inventory` interface stable for the frontend.
-- Store source-specific ids under `raw`, not in the frontend-facing inventory object.
+- Keep source-specific ids under `raw` from full import when useful, but do not rewrite `raw` during daily refresh.
+- If a known product page is empty, 404, or gone, mark its existing variants unavailable with empty inventory instead of deleting rows.
 - Write logs to `logs/kaufmann_refresh.log` when run as cron.
 - Use UTC timestamps in the database.
+
+Kaufmann refresh snapshots are stored in `kaufmann_inventory_snapshots`. This table is intentionally lean because it will grow daily:
+
+```text
+kaufmann_inventory_snapshots
+├── kaufmann_product_id
+├── source_parent_id
+├── source_color_id
+├── canonical_url
+├── source_url
+├── checked_at
+├── checked_bucket
+├── refresh_status
+├── current_price
+├── list_price
+├── webshop_sizes
+├── aarhus_inventory
+├── aarhus_total_stock
+└── aarhus_available
+```
+
+It stores one snapshot per Kaufmann variant per UTC day via `unique (kaufmann_product_id, checked_bucket)`. It does not store full `raw`, images, descriptions, brand metadata, or other stable catalog fields.
+
+Useful Kaufmann refresh commands:
+
+```bash
+python scripts/refresh_kaufmann_inventory.py --dry-run --url https://www.kaufmann.dk/produkt/boss-orange-196321 --no-delay
+python scripts/refresh_kaufmann_inventory.py --limit 5 --no-delay
+python scripts/refresh_kaufmann_inventory.py
+```
+
+Recommended Kaufmann daily cron entry:
+
+```cron
+15 2 * * * cd /opt/highlide/scraping_engine && .venv/bin/python scripts/refresh_kaufmann_inventory.py >> logs/kaufmann_refresh.log 2>&1
+```
 
 ## Current Database Assumptions
 
@@ -322,6 +368,12 @@ Recommended DigitalOcean cron entry:
 0 */2 * * * cd /opt/highlide/scraping_engine && .venv/bin/python scripts/refresh_inventory.py >> logs/refresh_inventory.log 2>&1
 ```
 
+Recommended Kaufmann refresh cron entry:
+
+```cron
+15 2 * * * cd /opt/highlide/scraping_engine && .venv/bin/python scripts/refresh_kaufmann_inventory.py >> logs/kaufmann_refresh.log 2>&1
+```
+
 Make sure the server has:
 
 - Python virtualenv installed
@@ -329,6 +381,8 @@ Make sure the server has:
 - Playwright Chromium installed
 - `.env` present with Supabase secret credentials
 - `logs/` directory created
+
+Prefer the systemd timer files in `deployment/systemd/` for the Kaufmann daily refresh on DigitalOcean. They include no-overlap locking with `flock`, daily scheduling, and a 12-hour timeout for long Playwright runs. See `deployment/digitalocean.md` for the full server runbook.
 
 ## Known Limitation: Color Variants
 

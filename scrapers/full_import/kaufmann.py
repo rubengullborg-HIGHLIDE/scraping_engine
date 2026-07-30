@@ -112,20 +112,31 @@ class KaufmanScraper(BaseScraper):
             print(f"  [!] Fejl ved sitemap {url}: {e}")
             return None
 
-    def parse_product_variants_with_js(self, url: str) -> list[dict[str, Any]]:
+    def parse_product_variants_with_js(
+        self,
+        url: str,
+        allow_unavailable: bool = False,
+    ) -> list[dict[str, Any]]:
         page = self._browser.new_page()
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if allow_unavailable and response and response.status in {404, 410}:
+                return []
             try:
                 page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
 
-            page.wait_for_function(
-                "window.Alpine && Alpine.store && Alpine.store('productStore') "
-                "&& Object.keys(Alpine.store('productStore').options || {}).length > 0",
-                timeout=20000,
-            )
+            try:
+                page.wait_for_function(
+                    "window.Alpine && Alpine.store && Alpine.store('productStore') "
+                    "&& Object.keys(Alpine.store('productStore').options || {}).length > 0",
+                    timeout=20000,
+                )
+            except Exception:
+                if allow_unavailable and self._looks_like_unavailable_page(page):
+                    return []
+                raise
 
             variants = page.evaluate(
                 """
@@ -339,6 +350,16 @@ class KaufmanScraper(BaseScraper):
     def close(self):
         self._browser.close()
         self._playwright.stop()
+
+    def _looks_like_unavailable_page(self, page: Any) -> bool:
+        text = page.locator("body").inner_text(timeout=3000).lower()
+        unavailable_patterns = (
+            "siden blev ikke fundet",
+            "produktet blev ikke fundet",
+            "produktet findes ikke",
+            "404",
+        )
+        return any(pattern in text for pattern in unavailable_patterns)
 
     def _clean_product_url(self, url: str) -> str:
         split = urlsplit(url.split("#", 1)[0])
