@@ -238,6 +238,32 @@ Recommended Kaufmann daily cron entry:
 15 2 * * * cd /opt/highlide/scraping_engine && .venv/bin/python scripts/refresh_kaufmann_inventory.py >> logs/kaufmann_refresh.log 2>&1
 ```
 
+Current deployment status as of July 30, 2026:
+
+- The Kaufmann refresh has been deployed on the DigitalOcean droplet at `~/scraping_engine`.
+- The systemd timer `highlide-kaufmann-refresh.timer` is enabled and active.
+- The droplet timezone is UTC, so the configured `02:15` timer runs around `04:15` Copenhagen summer time, plus up to `15m` randomized delay.
+- A manual full service run was started successfully and logs showed progress such as `[15/4878] Refreshing ...`.
+- Early observed droplet load during the run was about 77% CPU and 50% memory.
+- Logs are written to `~/scraping_engine/logs/kaufmann_refresh.log` on the droplet.
+
+Useful droplet commands:
+
+```bash
+systemctl list-timers highlide-kaufmann-refresh.timer
+systemctl status highlide-kaufmann-refresh.timer
+systemctl status highlide-kaufmann-refresh.service
+tail -f ~/scraping_engine/logs/kaufmann_refresh.log
+journalctl -u highlide-kaufmann-refresh.service -n 100
+```
+
+Parallel refresh guidance:
+
+- It is okay to run different store refresh scripts in parallel later if they touch separate store tables/rows and the droplet has enough CPU and memory.
+- Do not run multiple full Kaufmann refresh services at the same time. The systemd service uses `flock` to prevent overlap.
+- If Kaufmann ever needs parallelization, partition deliberately with `--offset` and `--limit`, use separate service names and lock files, and monitor Supabase/API load. Do not let two workers refresh the same `kaufmann_product_id` set for the same `checked_bucket`.
+- With the current observed load, keep Kaufmann at one worker unless runtime becomes a real problem.
+
 ## Current Database Assumptions
 
 The current production shape is a single `products` table with fields similar to:
