@@ -34,12 +34,14 @@ Do not mix these two paths. Full import can collect names, descriptions, images,
 │   ├── full_import/
 │   │   ├── base.py
 │   │   ├── kaufmann.py
+│   │   ├── romerhus.py
 │   │   └── st_valentin.py
 │   └── stores/
 │       ├── kaufmann.py
 │       └── st_valentin.py
 └── scripts/
     ├── import_kaufmann_products.py
+    ├── import_romerhus_products.py
     ├── refresh_kaufmann_inventory.py
     └── refresh_inventory.py
 ```
@@ -63,6 +65,54 @@ These are store-specific catalog scrapers. They are allowed to parse broad produ
 - store/source info
 
 Kaufmann full import is currently wired through `scripts/import_kaufmann_products.py`. Other full-import scrapers are still saved implementations until dedicated runners are added.
+
+### Rømerhus Full Import
+
+Location:
+
+- `scripts/import_romerhus_products.py`
+- `scrapers/full_import/romerhus.py`
+- `migrations/007_romerhus_products.sql`
+
+Rømerhus is the BESTSELLER Stores Shopify storefront. Import men's products
+into the dedicated `romerhus_products` table. Each Shopify product is one
+colour and its Shopify variants are sizes. Its unique key is
+`source_parent_id + source_color_id`, using the BESTSELLER style reference
+when available and the Shopify product id respectively.
+
+Do not infer local stock from Shopify's online `available` flag. Exact Click &
+Collect quantities are available through the public storefront endpoints:
+
+```text
+GET  /apps/bestseller-functions/locations
+POST /apps/bestseller-functions/variant-stock
+```
+
+Store both locations in `local_inventory` using stable keys:
+
+```text
+romerhus-aarhus       BESTSELLER Aarhus - Rømerhus
+gammeltorv-copenhagen BESTSELLER København – Gammeltorv
+```
+
+`local_inventory` follows the clean `{"stores": {...}}` interface. Keep source
+location ids and raw variant-stock data in `raw`; use `local_total_stock`,
+`local_available`, `aarhus_total_stock`, and `aarhus_available` for summaries.
+The default discovery set covers the men's clothing-category collections and
+excludes news, brand, and accessories collections because they can contain
+non-clothing duplicates such as caps. Pass `--collection nyheder-test` when a
+new-arrivals-only import is intentionally wanted. Catalogue collection feeds
+are used only for discovery; the importer then reads each product's Shopify
+product feed to retain the full description, price, type, colour, and material
+data. Keep the default polite delay enabled for a full import.
+
+Useful commands:
+
+```bash
+python scripts/import_romerhus_products.py --discover-only --preview 10
+python scripts/import_romerhus_products.py --dry-run --limit 1 --no-delay
+python scripts/import_romerhus_products.py --url https://bestseller-stores.dk/products/t-shirts-tops_t-shirt_relaxed-fit_black_16104335_5221603 --dry-run --no-delay
+```
 
 ### Kaufmann Full Import
 
@@ -246,6 +296,17 @@ Current deployment status as of July 30, 2026:
 - A manual full service run was started successfully and logs showed progress such as `[15/4878] Refreshing ...`.
 - Early observed droplet load during the run was about 77% CPU and 50% memory.
 - Logs are written to `~/scraping_engine/logs/kaufmann_refresh.log` on the droplet.
+
+July 31, 2026 refresh incident:
+
+- The July 30 and July 31 Kaufmann refresh runs did not complete the full table.
+- On July 31, Supabase showed about 5,457 of 8,023 variant rows updated, covering about 3,269 of 4,878 product pages.
+- The remaining 2,566 variants still had July 8 `updated_at` values.
+- `kaufmann_inventory_snapshots` showed similar partial coverage: 4,671 variants on July 30 and about 5,462 variants on July 31 at the time of inspection.
+- The service has `TimeoutStartSec=12h`, so long runs can be killed by systemd before reaching the end.
+- The original refresh script ordered work by `id`, so each daily run repeated the first part of the catalogue and never prioritized the stale tail if it timed out.
+- The script has since been changed to read existing variants ordered by `updated_at.asc,id.asc`, so the oldest/stalest product pages refresh first.
+- Product and snapshot writes have also been changed from per-variant REST writes to page-level batched upserts, reducing Supabase HTTP write overhead.
 
 Useful droplet commands:
 

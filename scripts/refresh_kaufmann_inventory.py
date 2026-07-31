@@ -103,6 +103,7 @@ class SupabaseKaufmannRefreshClient:
                 "source_color_id",
                 "source_url",
                 "canonical_url",
+                "updated_at",
             )
         )
 
@@ -110,7 +111,7 @@ class SupabaseKaufmannRefreshClient:
             end = start + page_size - 1
             response = self.session.get(
                 self._table_url(table),
-                params={"select": select, "order": "id.asc"},
+                params={"select": select, "order": "updated_at.asc,id.asc"},
                 headers={"Range": f"{start}-{end}"},
             )
             response.raise_for_status()
@@ -120,21 +121,25 @@ class SupabaseKaufmannRefreshClient:
                 return rows
             start += page_size
 
-    def patch_product(self, table: str, product_id: Any, payload: dict[str, Any]) -> None:
-        response = self.session.patch(
+    def upsert_products_by_id(self, table: str, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        response = self.session.post(
             self._table_url(table),
-            params={"id": f"eq.{product_id}"},
-            headers={"Prefer": "return=minimal"},
-            data=json.dumps(payload, ensure_ascii=False),
+            params={"on_conflict": "id"},
+            headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+            data=json.dumps(rows, ensure_ascii=False),
         )
         response.raise_for_status()
 
-    def upsert_snapshot(self, table: str, payload: dict[str, Any]) -> None:
+    def upsert_snapshots(self, table: str, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
         response = self.session.post(
             self._table_url(table),
             params={"on_conflict": "kaufmann_product_id,checked_bucket"},
             headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
-            data=json.dumps(payload, ensure_ascii=False),
+            data=json.dumps(rows, ensure_ascii=False),
         )
         response.raise_for_status()
 
@@ -167,6 +172,13 @@ def rows_by_canonical_url(rows: list[dict[str, Any]]) -> dict[str, list[dict[str
 
 def dynamic_product_payload(scraped_row: dict[str, Any]) -> dict[str, Any]:
     return {column: scraped_row[column] for column in DYNAMIC_PRODUCT_COLUMNS if column in scraped_row}
+
+
+def dynamic_product_upsert_row(product_id: Any, scraped_row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": product_id,
+        **dynamic_product_payload(scraped_row),
+    }
 
 
 def snapshot_payload(
@@ -205,6 +217,17 @@ def unavailable_product_payload(checked_at: str, canonical_url: Optional[str]) -
         "aarhus_available": False,
         "scraped_at": checked_at,
         "updated_at": checked_at,
+    }
+
+
+def unavailable_product_upsert_row(
+    product_id: Any,
+    checked_at: str,
+    canonical_url: Optional[str],
+) -> dict[str, Any]:
+    return {
+        "id": product_id,
+        **unavailable_product_payload(checked_at, canonical_url),
     }
 
 
@@ -316,20 +339,31 @@ def refresh_kaufmann_inventory(args: argparse.Namespace) -> int:
                                 product_row["id"],
                                 json.dumps(unavailable_product_payload(checked_at, canonical_url)),
                             )
-                        else:
-                            assert client is not None
-                            client.patch_product(
-                                products_table,
-                                product_row["id"],
-                                unavailable_product_payload(checked_at, canonical_url),
-                            )
-                            client.upsert_snapshot(
-                                snapshots_table,
-                                unavailable_snapshot_payload(product_row, checked_at),
-                            )
                         unavailable_variants += 1
+                    if product_rows and not args.dry_run:
+                        assert client is not None
+                        client.upsert_products_by_id(
+                            products_table,
+                            [
+                                unavailable_product_upsert_row(
+                                    product_row["id"],
+                                    checked_at,
+                                    canonical_url,
+                                )
+                                for product_row in product_rows
+                            ],
+                        )
+                        client.upsert_snapshots(
+                            snapshots_table,
+                            [
+                                unavailable_snapshot_payload(product_row, checked_at)
+                                for product_row in product_rows
+                            ],
+                        )
                     continue
 
+                product_updates = []
+                snapshots = []
                 for scraped_row in scraped_rows:
                     source_parent_id = scraped_row.get("source_parent_id")
                     source_color_id = scraped_row.get("source_color_id")
@@ -358,17 +392,16 @@ def refresh_kaufmann_inventory(args: argparse.Namespace) -> int:
                             json.dumps(dynamic_product_payload(scraped_row), ensure_ascii=False),
                         )
                     else:
-                        assert client is not None
-                        client.patch_product(
-                            products_table,
-                            product_row["id"],
-                            dynamic_product_payload(scraped_row),
+                        product_updates.append(
+                            dynamic_product_upsert_row(product_row["id"], scraped_row)
                         )
-                        client.upsert_snapshot(
-                            snapshots_table,
-                            snapshot_payload(product_row, scraped_row, checked_at),
-                        )
+                        snapshots.append(snapshot_payload(product_row, scraped_row, checked_at))
                     refreshed_variants += 1
+
+                if product_updates:
+                    assert client is not None
+                    client.upsert_products_by_id(products_table, product_updates)
+                    client.upsert_snapshots(snapshots_table, snapshots)
 
             except Exception:
                 failed_pages += 1
