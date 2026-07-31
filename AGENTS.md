@@ -307,6 +307,7 @@ July 31, 2026 refresh incident:
 - The original refresh script ordered work by `id`, so each daily run repeated the first part of the catalogue and never prioritized the stale tail if it timed out.
 - The script has since been changed to read existing variants ordered by `updated_at.asc,id.asc`, so the oldest/stalest product pages refresh first.
 - Product and snapshot writes have also been changed from per-variant REST writes to page-level batched upserts, reducing Supabase HTTP write overhead.
+- The first batched write attempt failed on the droplet with `400 Bad Request ... kaufmann_products?on_conflict=id` because the upsert rows only included `id` plus dynamic fields. Supabase/PostgREST still needs required NOT NULL identity columns for the insert side of an upsert. `scripts/refresh_kaufmann_inventory.py` now includes existing `source_parent_id`, `source_color_id`, and `source_url` in each product upsert row while still only changing dynamic values in practice.
 
 Useful droplet commands:
 

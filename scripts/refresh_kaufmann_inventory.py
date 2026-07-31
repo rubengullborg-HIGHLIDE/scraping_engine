@@ -174,9 +174,15 @@ def dynamic_product_payload(scraped_row: dict[str, Any]) -> dict[str, Any]:
     return {column: scraped_row[column] for column in DYNAMIC_PRODUCT_COLUMNS if column in scraped_row}
 
 
-def dynamic_product_upsert_row(product_id: Any, scraped_row: dict[str, Any]) -> dict[str, Any]:
+def dynamic_product_upsert_row(
+    product_row: dict[str, Any],
+    scraped_row: dict[str, Any],
+) -> dict[str, Any]:
     return {
-        "id": product_id,
+        "id": product_row["id"],
+        "source_parent_id": product_row["source_parent_id"],
+        "source_color_id": product_row["source_color_id"],
+        "source_url": product_row["source_url"],
         **dynamic_product_payload(scraped_row),
     }
 
@@ -221,12 +227,15 @@ def unavailable_product_payload(checked_at: str, canonical_url: Optional[str]) -
 
 
 def unavailable_product_upsert_row(
-    product_id: Any,
+    product_row: dict[str, Any],
     checked_at: str,
     canonical_url: Optional[str],
 ) -> dict[str, Any]:
     return {
-        "id": product_id,
+        "id": product_row["id"],
+        "source_parent_id": product_row["source_parent_id"],
+        "source_color_id": product_row["source_color_id"],
+        "source_url": product_row["source_url"],
         **unavailable_product_payload(checked_at, canonical_url),
     }
 
@@ -346,7 +355,7 @@ def refresh_kaufmann_inventory(args: argparse.Namespace) -> int:
                             products_table,
                             [
                                 unavailable_product_upsert_row(
-                                    product_row["id"],
+                                    product_row,
                                     checked_at,
                                     canonical_url,
                                 )
@@ -393,7 +402,7 @@ def refresh_kaufmann_inventory(args: argparse.Namespace) -> int:
                         )
                     else:
                         product_updates.append(
-                            dynamic_product_upsert_row(product_row["id"], scraped_row)
+                            dynamic_product_upsert_row(product_row, scraped_row)
                         )
                         snapshots.append(snapshot_payload(product_row, scraped_row, checked_at))
                     refreshed_variants += 1
